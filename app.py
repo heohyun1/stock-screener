@@ -30,10 +30,9 @@ def calc_stars(per, pbr, revenue_growth, profit_margin):
         elif profit_margin < 0: score -= 1
     if score >= 6: return 5
     elif score >= 4: return 4
-    elif score >= 2: score = 3
+    elif score >= 2: return 3
     elif score >= 1: return 2
     else: return 1
-    return score
 
 def get_recommendation(stars):
     if stars >= 5: return {"label": "강력추천", "color": "green", "icon": "🌟"}
@@ -42,54 +41,54 @@ def get_recommendation(stars):
     else: return {"label": "비추천", "color": "red", "icon": "❌"}
 
 SECTOR_MAP = {
-    "반도체/IT": ["반도체", "전자", "디스플레이", "IT", "전기전자"],
-    "바이오/제약": ["제약", "바이오", "의약품", "의료"],
-    "건설/부동산": ["건설", "부동산", "건축"],
-    "음식/식품": ["음식료", "식품", "음료", "제과"],
-    "금융/은행": ["은행", "금융", "보험", "증권"],
-    "자동차": ["자동차", "운수장비"],
-    "화학/소재": ["화학", "소재", "정유"],
-    "엔터/미디어": ["엔터", "미디어", "방송", "게임"],
-    "유통/소비재": ["유통", "도소매", "소비재"],
-    "에너지": ["에너지", "전기", "가스"],
-    "운송/물류": ["운송", "항공", "해운"],
-    "통신": ["통신"],
-    "철강/금속": ["철강", "금속"],
-    "방산": ["방산", "항공우주"],
-    "2차전지": ["2차전지", "배터리"],
+    "반도체/IT": ["반도체", "전자", "디스플레이", "IT", "전기전자", "소프트웨어", "통신장비", "컴퓨터"],
+    "바이오/제약": ["제약", "바이오", "의약품", "의료", "헬스케어"],
+    "건설/부동산": ["건설", "부동산", "건축", "주택"],
+    "음식/식품": ["음식료", "식품", "음료", "제과", "농업"],
+    "금융/은행": ["은행", "금융", "보험", "증권", "카드"],
+    "자동차": ["자동차", "운수장비", "타이어"],
+    "화학/소재": ["화학", "소재", "정유", "석유", "플라스틱"],
+    "엔터/미디어": ["엔터", "미디어", "방송", "게임", "콘텐츠", "영화"],
+    "유통/소비재": ["유통", "도소매", "소비재", "백화점", "마트"],
+    "에너지": ["에너지", "전기", "가스", "신재생", "태양광"],
+    "운송/물류": ["운송", "항공", "해운", "물류", "택배"],
+    "통신": ["통신", "이동통신", "인터넷"],
+    "철강/금속": ["철강", "금속", "비철금속", "제철"],
+    "방산": ["방산", "항공우주", "방위"],
+    "2차전지": ["2차전지", "배터리", "전지", "리튬"],
 }
 
-def get_dart_financials_bulk(year):
-    """DART 전체 재무데이터 한번에 받기"""
+def get_dart_financials(year):
+    """DART 재무데이터 - 개별 계정과목 조회"""
     results = {}
     try:
-        # 주요 계정과목만 조회
-        for account in ["매출액", "영업이익"]:
-            r = requests.get(f"{DART_BASE}/fnlttMultiAcnt.json", params={
-                "crtfc_key": DART_API_KEY,
-                "bsns_year": str(year),
-                "reprt_code": "11011",
-                "fs_div": "CFS"
-            }, timeout=20)
-            data = r.json()
-            if data.get("status") == "000":
-                for item in data.get("list", []):
-                    code = item.get("stock_code", "").strip()
-                    if not code: continue
-                    if code not in results:
-                        results[code] = {}
-                    acct = item.get("account_nm", "")
-                    val = item.get("thstrm_amount", "").replace(",", "").strip()
-                    try:
-                        val = int(val)
-                    except:
-                        continue
-                    if "매출" in acct:
+        r = requests.get(f"{DART_BASE}/fnlttMultiAcnt.json", params={
+            "crtfc_key": DART_API_KEY,
+            "bsns_year": str(year),
+            "reprt_code": "11011",
+        }, timeout=30)
+        data = r.json()
+        if data.get("status") == "000":
+            for item in data.get("list", []):
+                code = str(item.get("stock_code", "")).strip().zfill(6)
+                if not code or code == "000000": continue
+                acct = item.get("account_nm", "")
+                val_str = item.get("thstrm_amount", "").replace(",", "").strip()
+                try:
+                    val = int(val_str)
+                except:
+                    continue
+                if code not in results:
+                    results[code] = {}
+                if any(k in acct for k in ["매출액", "수익(매출액)", "영업수익"]):
+                    if "revenue" not in results[code]:
                         results[code]["revenue"] = val
-                    elif "영업이익" in acct:
+                elif "영업이익" in acct:
+                    if "operating_profit" not in results[code]:
                         results[code]["operating_profit"] = val
+        print(f"DART {year}년 데이터: {len(results)}개 종목")
     except Exception as e:
-        print(f"DART 벌크 오류: {e}")
+        print(f"DART 오류: {e}")
     return results
 
 @app.route("/api/health")
@@ -101,10 +100,9 @@ def screener():
     market = request.args.get("market", "ALL").upper()
     sort_by = request.args.get("sort", "per")
     limit = int(request.args.get("limit", 50))
-    sector = request.args.get("sector", "")
+    sector = request.args.get("sector", "").strip()
     search = request.args.get("search", "").strip()
 
-    # KRX 종목 리스트
     try:
         if market == "KOSPI":
             df = fdr.StockListing("KOSPI"); df["Market"] = "KOSPI"
@@ -119,11 +117,10 @@ def screener():
 
     df.columns = [c.strip() for c in df.columns]
 
-    # DART 재무데이터 한번에
     prev_year = datetime.now().year - 1
     prev2_year = prev_year - 1
-    fin_cur = get_dart_financials_bulk(prev_year)
-    fin_prev = get_dart_financials_bulk(prev2_year)
+    fin_cur = get_dart_financials(prev_year)
+    fin_prev = get_dart_financials(prev2_year)
 
     def to_float(v):
         try: return float(str(v).replace(",", ""))
@@ -139,9 +136,12 @@ def screener():
 
             if not name or name == "nan": continue
             if search and search.lower() not in name.lower() and search not in code: continue
+
+            # 섹터 필터
             if sector:
                 keywords = SECTOR_MAP.get(sector, [])
-                if not any(k in industry for k in keywords): continue
+                matched = any(k in industry for k in keywords)
+                if not matched: continue
 
             per = to_float(row.get("PER"))
             pbr = to_float(row.get("PBR"))
@@ -151,7 +151,6 @@ def screener():
             per = round(per, 1) if per and 0 < per < 500 else None
             pbr = round(pbr, 1) if pbr and 0 < pbr < 100 else None
 
-            # DART 재무
             fin = fin_cur.get(code, {})
             fin_p = fin_prev.get(code, {})
             revenue_cur = fin.get("revenue")
@@ -172,14 +171,15 @@ def screener():
                 "code": code, "name": name, "market": mkt, "industry": industry,
                 "price": int(price) if price else None,
                 "per": per, "pbr": pbr,
-                "revenue": revenue_cur, "revenue_growth": revenue_growth,
-                "operating_profit": op_profit, "profit_margin": profit_margin,
+                "revenue": revenue_cur,
+                "revenue_growth": revenue_growth,
+                "operating_profit": op_profit,
+                "profit_margin": profit_margin,
                 "marcap": int(marcap) if marcap else None,
                 "stars": stars, "recommendation": rec,
             })
         except: continue
 
-    # 정렬
     if sort_by == "per":
         results = [r for r in results if r["per"]]
         results.sort(key=lambda x: x["per"])
@@ -214,7 +214,7 @@ def stock_detail(code):
     prev_year = datetime.now().year - 1
     years_data = []
     for y in [prev_year-2, prev_year-1, prev_year]:
-        fin = get_dart_financials_bulk(y)
+        fin = get_dart_financials(y)
         d = fin.get(code, {})
         rev = d.get("revenue")
         op = d.get("operating_profit")
@@ -232,9 +232,11 @@ def stock_detail(code):
         price_history = []; high_52w = low_52w = None
 
     return jsonify({
-        "code": code, "financials": years_data,
+        "code": code,
+        "financials": years_data,
         "price_history": price_history,
-        "high_52w": high_52w, "low_52w": low_52w,
+        "high_52w": high_52w,
+        "low_52w": low_52w,
     })
 
 if __name__ == "__main__":
