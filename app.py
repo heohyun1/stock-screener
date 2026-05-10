@@ -5,6 +5,7 @@ import pandas as pd
 import requests
 import os
 from datetime import datetime
+from io import StringIO
 
 app = Flask(__name__)
 CORS(app, origins="*")
@@ -39,6 +40,65 @@ def get_recommendation(stars):
     elif stars >= 4: return {"label": "추천", "color": "blue", "icon": "⭐"}
     elif stars >= 3: return {"label": "보통", "color": "gray", "icon": "➖"}
     else: return {"label": "비추천", "color": "red", "icon": "❌"}
+
+def get_krx_data():
+    """KRX에서 PER/PBR 포함 전종목 데이터"""
+    try:
+        url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+        headers = {
+            "Referer": "http://data.krx.co.kr",
+            "User-Agent": "Mozilla/5.0"
+        }
+        # KOSPI
+        kospi_data = requests.post(url, data={
+            "bld": "dbms/MDC/STAT/standard/MDCSTAT03501",
+            "mktId": "STK",
+            "trdDd": datetime.now().strftime("%Y%m%d"),
+            "share": "1",
+            "money": "1",
+            "csvxls_isNo": "false"
+        }, headers=headers, timeout=15).json()
+
+        # KOSDAQ
+        kosdaq_data = requests.post(url, data={
+            "bld": "dbms/MDC/STAT/standard/MDCSTAT03501",
+            "mktId": "KSQ",
+            "trdDd": datetime.now().strftime("%Y%m%d"),
+            "share": "1",
+            "money": "1",
+            "csvxls_isNo": "false"
+        }, headers=headers, timeout=15).json()
+
+        result = {}
+        for item in kospi_data.get("OutBlock_1", []):
+            code = str(item.get("ISU_SRT_CD", "")).zfill(6)
+            try:
+                per = float(str(item.get("PER", "")).replace(",", "")) 
+                pbr = float(str(item.get("PBR", "")).replace(",", ""))
+                result[code] = {
+                    "per": round(per, 1) if 0 < per < 500 else None,
+                    "pbr": round(pbr, 1) if 0 < pbr < 100 else None,
+                    "market": "KOSPI"
+                }
+            except: pass
+
+        for item in kosdaq_data.get("OutBlock_1", []):
+            code = str(item.get("ISU_SRT_CD", "")).zfill(6)
+            try:
+                per = float(str(item.get("PER", "")).replace(",", ""))
+                pbr = float(str(item.get("PBR", "")).replace(",", ""))
+                result[code] = {
+                    "per": round(per, 1) if 0 < per < 500 else None,
+                    "pbr": round(pbr, 1) if 0 < pbr < 100 else None,
+                    "market": "KOSDAQ"
+                }
+            except: pass
+
+        print(f"KRX 데이터: {len(result)}개")
+        return result
+    except Exception as e:
+        print(f"KRX 오류: {e}")
+        return {}
 
 def get_dart_financials(year):
     results = {}
@@ -76,24 +136,6 @@ def get_dart_financials(year):
 def health():
     return jsonify({"status": "ok", "time": datetime.now().isoformat()})
 
-@app.route("/api/industries")
-def industries():
-    """실제 업종명 확인용"""
-    try:
-        k1 = fdr.StockListing("KOSPI")
-        k1["Market"] = "KOSPI"
-        k2 = fdr.StockListing("KOSDAQ")
-        k2["Market"] = "KOSDAQ"
-        df = pd.concat([k1, k2], ignore_index=True)
-        df.columns = [c.strip() for c in df.columns]
-        col = "Industry" if "Industry" in df.columns else "Sector" if "Sector" in df.columns else None
-        if col:
-            industries = df[col].dropna().unique().tolist()
-            return jsonify({"industries": sorted(industries[:100])})
-        return jsonify({"error": "업종 컬럼 없음", "columns": df.columns.tolist()})
-    except Exception as e:
-        return jsonify({"error": str(e)})
-
 @app.route("/api/screener")
 def screener():
     market = request.args.get("market", "ALL").upper()
@@ -102,6 +144,7 @@ def screener():
     sector = request.args.get("sector", "").strip()
     search = request.args.get("search", "").strip()
 
+    # FDR로 종목리스트 + 업종
     try:
         if market == "KOSPI":
             df = fdr.StockListing("KOSPI"); df["Market"] = "KOSPI"
@@ -116,6 +159,10 @@ def screener():
 
     df.columns = [c.strip() for c in df.columns]
 
+    # KRX PER/PBR 데이터
+    krx_data = get_krx_data()
+
+    # DART 재무데이터
     prev_year = datetime.now().year - 1
     prev2_year = prev_year - 1
     fin_cur = get_dart_financials(prev_year)
@@ -125,7 +172,6 @@ def screener():
         try: return float(str(v).replace(",", ""))
         except: return None
 
-    # 업종 컬럼 찾기
     industry_col = None
     for c in ["Industry", "Sector", "업종"]:
         if c in df.columns:
@@ -144,14 +190,16 @@ def screener():
             if search and search.lower() not in name.lower() and search not in code: continue
             if sector and sector not in industry: continue
 
-            per = to_float(row.get("PER"))
-            pbr = to_float(row.get("PBR"))
+            # KRX에서 PER/PBR 가져오기
+            krx = krx_data.get(code, {})
+            per = krx.get("per")
+            pbr = krx.get("pbr")
+
+            # FDR에서 가격/시총
             price = to_float(row.get("Close", row.get("Adj Close")))
             marcap = to_float(row.get("Marcap"))
 
-            per = round(per, 1) if per and 0 < per < 500 else None
-            pbr = round(pbr, 1) if pbr and 0 < pbr < 100 else None
-
+            # DART 재무
             fin = fin_cur.get(code, {})
             fin_p = fin_prev.get(code, {})
             revenue_cur = fin.get("revenue")
@@ -181,12 +229,12 @@ def screener():
             })
         except: continue
 
-    # 정렬 - 데이터 없어도 전체 보여주기
+    # 정렬
     if sort_by == "per":
-        has_per = [r for r in results if r["per"]]
-        no_per = [r for r in results if not r["per"]]
-        has_per.sort(key=lambda x: x["per"])
-        results = has_per + no_per
+        has = [r for r in results if r["per"]]
+        no = [r for r in results if not r["per"]]
+        has.sort(key=lambda x: x["per"])
+        results = has + no
     elif sort_by == "revenue_growth":
         has = [r for r in results if r["revenue_growth"] is not None]
         no = [r for r in results if r["revenue_growth"] is None]
