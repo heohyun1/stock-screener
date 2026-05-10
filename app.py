@@ -40,26 +40,7 @@ def get_recommendation(stars):
     elif stars >= 3: return {"label": "보통", "color": "gray", "icon": "➖"}
     else: return {"label": "비추천", "color": "red", "icon": "❌"}
 
-SECTOR_MAP = {
-    "반도체/IT": ["반도체", "전자", "디스플레이", "IT", "전기전자", "소프트웨어", "통신장비", "컴퓨터"],
-    "바이오/제약": ["제약", "바이오", "의약품", "의료", "헬스케어"],
-    "건설/부동산": ["건설", "부동산", "건축", "주택"],
-    "음식/식품": ["음식료", "식품", "음료", "제과", "농업"],
-    "금융/은행": ["은행", "금융", "보험", "증권", "카드"],
-    "자동차": ["자동차", "운수장비", "타이어"],
-    "화학/소재": ["화학", "소재", "정유", "석유", "플라스틱"],
-    "엔터/미디어": ["엔터", "미디어", "방송", "게임", "콘텐츠", "영화"],
-    "유통/소비재": ["유통", "도소매", "소비재", "백화점", "마트"],
-    "에너지": ["에너지", "전기", "가스", "신재생", "태양광"],
-    "운송/물류": ["운송", "항공", "해운", "물류", "택배"],
-    "통신": ["통신", "이동통신", "인터넷"],
-    "철강/금속": ["철강", "금속", "비철금속", "제철"],
-    "방산": ["방산", "항공우주", "방위"],
-    "2차전지": ["2차전지", "배터리", "전지", "리튬"],
-}
-
 def get_dart_financials(year):
-    """DART 재무데이터 - 개별 계정과목 조회"""
     results = {}
     try:
         r = requests.get(f"{DART_BASE}/fnlttMultiAcnt.json", params={
@@ -83,10 +64,10 @@ def get_dart_financials(year):
                 if any(k in acct for k in ["매출액", "수익(매출액)", "영업수익"]):
                     if "revenue" not in results[code]:
                         results[code]["revenue"] = val
-                elif "영업이익" in acct:
+                elif "영업이익" in acct and "영업이익률" not in acct:
                     if "operating_profit" not in results[code]:
                         results[code]["operating_profit"] = val
-        print(f"DART {year}년 데이터: {len(results)}개 종목")
+        print(f"DART {year}년: {len(results)}개")
     except Exception as e:
         print(f"DART 오류: {e}")
     return results
@@ -95,10 +76,28 @@ def get_dart_financials(year):
 def health():
     return jsonify({"status": "ok", "time": datetime.now().isoformat()})
 
+@app.route("/api/industries")
+def industries():
+    """실제 업종명 확인용"""
+    try:
+        k1 = fdr.StockListing("KOSPI")
+        k1["Market"] = "KOSPI"
+        k2 = fdr.StockListing("KOSDAQ")
+        k2["Market"] = "KOSDAQ"
+        df = pd.concat([k1, k2], ignore_index=True)
+        df.columns = [c.strip() for c in df.columns]
+        col = "Industry" if "Industry" in df.columns else "Sector" if "Sector" in df.columns else None
+        if col:
+            industries = df[col].dropna().unique().tolist()
+            return jsonify({"industries": sorted(industries[:100])})
+        return jsonify({"error": "업종 컬럼 없음", "columns": df.columns.tolist()})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 @app.route("/api/screener")
 def screener():
     market = request.args.get("market", "ALL").upper()
-    sort_by = request.args.get("sort", "per")
+    sort_by = request.args.get("sort", "stars")
     limit = int(request.args.get("limit", 50))
     sector = request.args.get("sector", "").strip()
     search = request.args.get("search", "").strip()
@@ -126,22 +125,24 @@ def screener():
         try: return float(str(v).replace(",", ""))
         except: return None
 
+    # 업종 컬럼 찾기
+    industry_col = None
+    for c in ["Industry", "Sector", "업종"]:
+        if c in df.columns:
+            industry_col = c
+            break
+
     results = []
     for _, row in df.iterrows():
         try:
             code = str(row.get("Code", "")).zfill(6)
             name = str(row.get("Name", ""))
             mkt = str(row.get("Market", market))
-            industry = str(row.get("Industry", row.get("Sector", "")))
+            industry = str(row.get(industry_col, "")) if industry_col else ""
 
             if not name or name == "nan": continue
             if search and search.lower() not in name.lower() and search not in code: continue
-
-            # 섹터 필터
-            if sector:
-                keywords = SECTOR_MAP.get(sector, [])
-                matched = any(k in industry for k in keywords)
-                if not matched: continue
+            if sector and sector not in industry: continue
 
             per = to_float(row.get("PER"))
             pbr = to_float(row.get("PBR"))
@@ -180,18 +181,27 @@ def screener():
             })
         except: continue
 
+    # 정렬 - 데이터 없어도 전체 보여주기
     if sort_by == "per":
-        results = [r for r in results if r["per"]]
-        results.sort(key=lambda x: x["per"])
+        has_per = [r for r in results if r["per"]]
+        no_per = [r for r in results if not r["per"]]
+        has_per.sort(key=lambda x: x["per"])
+        results = has_per + no_per
     elif sort_by == "revenue_growth":
-        results = [r for r in results if r["revenue_growth"] is not None]
-        results.sort(key=lambda x: x["revenue_growth"], reverse=True)
+        has = [r for r in results if r["revenue_growth"] is not None]
+        no = [r for r in results if r["revenue_growth"] is None]
+        has.sort(key=lambda x: x["revenue_growth"], reverse=True)
+        results = has + no
     elif sort_by == "pbr":
-        results = [r for r in results if r["pbr"]]
-        results.sort(key=lambda x: x["pbr"])
+        has = [r for r in results if r["pbr"]]
+        no = [r for r in results if not r["pbr"]]
+        has.sort(key=lambda x: x["pbr"])
+        results = has + no
     elif sort_by == "profit_margin":
-        results = [r for r in results if r["profit_margin"] is not None]
-        results.sort(key=lambda x: x["profit_margin"], reverse=True)
+        has = [r for r in results if r["profit_margin"] is not None]
+        no = [r for r in results if r["profit_margin"] is None]
+        has.sort(key=lambda x: x["profit_margin"], reverse=True)
+        results = has + no
     elif sort_by == "stars":
         results.sort(key=lambda x: x["stars"], reverse=True)
 
