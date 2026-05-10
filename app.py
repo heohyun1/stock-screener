@@ -141,11 +141,11 @@ def screener():
     code_col = "Code" if "Code" in df.columns else df.columns[0]
     name_col = "Name" if "Name" in df.columns else df.columns[1]
 
-    # 시총 상위 300개만 처리 (속도)
+    # 시총 상위 50개만 처리 (메모리 절약)
     if "Marcap" in df.columns:
-        df = df.sort_values("Marcap", ascending=False).head(300)
+        df = df.sort_values("Marcap", ascending=False).head(50)
     else:
-        df = df.head(300)
+        df = df.head(50)
 
     current_year = datetime.now().year
     prev_year = current_year - 1
