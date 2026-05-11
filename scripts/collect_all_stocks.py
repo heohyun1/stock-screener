@@ -57,11 +57,29 @@ def load_corp_map():
         print(f"corp_map 오류: {e}")
     return corp_map
 
-def get_dart_financials_bulk(corp_codes_list, year):
-    """100개씩 묶어서 DART 재무데이터 조회"""
+def test_dart_api():
+    """DART API 접속 테스트"""
+    try:
+        r = requests.get(f"{DART_BASE}/fnlttMultiAcnt.json", params={
+            "crtfc_key": DART_API_KEY,
+            "corp_code": "00126380,00164779",
+            "bsns_year": "2024",
+            "reprt_code": "11011",
+        }, timeout=30)
+        data = r.json()
+        status = data.get("status")
+        count = len(data.get("list", []))
+        print(f"DART API 테스트: status={status}, count={count}")
+        return status == "000"
+    except Exception as e:
+        print(f"DART API 테스트 실패: {e}")
+        return False
+
+def get_dart_financials_batch(corp_codes_list, year):
+    """100개씩 배치로 DART 재무데이터 조회"""
     all_data = {}
-    total_batches = len(corp_codes_list)
-    
+    total = len(corp_codes_list)
+
     for i, batch in enumerate(corp_codes_list):
         try:
             corp_code_str = ",".join(batch)
@@ -88,15 +106,23 @@ def get_dart_financials_bulk(corp_codes_list, year):
                         all_data[code]["revenue"] = val
                     elif "영업이익" in acct and "영업이익률" not in acct and "operating_profit" not in all_data[code]:
                         all_data[code]["operating_profit"] = val
-            if (i+1) % 10 == 0:
-                print(f"  배치 {i+1}/{total_batches} 완료 ({len(all_data)}개 누적)")
+            else:
+                print(f"배치 {i+1} 오류: status={data.get('status')}, msg={data.get('message')}")
+
+            if (i+1) % 5 == 0:
+                print(f"  배치 {i+1}/{total} 완료 ({len(all_data)}개 누적)")
         except Exception as e:
-            print(f"배치 {i+1} 오류: {e}")
-    
+            print(f"배치 {i+1} 예외: {e}")
+
     return all_data
 
 def main():
     print("전종목 데이터 수집 시작...")
+
+    # DART API 테스트
+    print("DART API 접속 테스트 중...")
+    dart_ok = test_dart_api()
+    print(f"DART API 사용 가능: {dart_ok}")
 
     # FDR 전종목
     k1 = fdr.StockListing("KOSPI"); k1["Market"] = "KOSPI"
@@ -105,42 +131,40 @@ def main():
     df.columns = [c.strip() for c in df.columns]
     print(f"전체 종목: {len(df)}개")
 
-    # corp_map 로드
-    corp_map = load_corp_map()
+    fin_cur = {}
+    fin_prev = {}
 
-    # corp_code 100개씩 배치 만들기
+    if dart_ok:
+        corp_map = load_corp_map()
+        prev_year = datetime.now().year - 1
+        prev2_year = prev_year - 1
+
+        # corp_code 배치 만들기
+        all_corp_codes = []
+        for _, row in df.iterrows():
+            code = str(row.get("Code", "")).zfill(6)
+            corp_code = corp_map.get(code)
+            if corp_code:
+                all_corp_codes.append(corp_code)
+
+        batch_size = 100
+        batches = [all_corp_codes[i:i+batch_size] for i in range(0, len(all_corp_codes), batch_size)]
+        print(f"총 {len(batches)}개 배치")
+
+        print(f"{prev_year}년 재무데이터 수집 중...")
+        fin_cur = get_dart_financials_batch(batches, prev_year)
+        print(f"{prev_year}년 완료: {len(fin_cur)}개")
+
+        print(f"{prev2_year}년 재무데이터 수집 중...")
+        fin_prev = get_dart_financials_batch(batches, prev2_year)
+        print(f"{prev2_year}년 완료: {len(fin_prev)}개")
+
     def to_float(v):
         try: return float(str(v).replace(",", "").strip())
         except: return None
 
     industry_col = next((c for c in ["Industry", "Sector", "업종"] if c in df.columns), None)
 
-    # 전체 corp_code 리스트
-    all_corp_codes = []
-    for _, row in df.iterrows():
-        code = str(row.get("Code", "")).zfill(6)
-        corp_code = corp_map.get(code)
-        if corp_code:
-            all_corp_codes.append(corp_code)
-
-    # 100개씩 배치
-    batch_size = 100
-    batches = [all_corp_codes[i:i+batch_size] for i in range(0, len(all_corp_codes), batch_size)]
-    print(f"총 {len(batches)}개 배치로 처리")
-
-    # DART 재무데이터 수집
-    prev_year = datetime.now().year - 1
-    prev2_year = prev_year - 1
-
-    print(f"{prev_year}년 재무데이터 수집 중...")
-    fin_cur = get_dart_financials_bulk(batches, prev_year)
-    print(f"{prev_year}년 완료: {len(fin_cur)}개")
-
-    print(f"{prev2_year}년 재무데이터 수집 중...")
-    fin_prev = get_dart_financials_bulk(batches, prev2_year)
-    print(f"{prev2_year}년 완료: {len(fin_prev)}개")
-
-    # 데이터 합치기
     stocks = []
     for _, row in df.iterrows():
         try:
