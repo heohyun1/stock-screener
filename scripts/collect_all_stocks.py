@@ -1,17 +1,9 @@
-import FinanceDataReader as fdr
-import pandas as pd
 import requests
-import os
-import zipfile
-import io
-import xml.etree.ElementTree as ET
+import pandas as pd
 import json
+import os
+from datetime import datetime, timedelta
 import time
-from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-DART_API_KEY = os.environ.get("DART_API_KEY", "c0dfa28be5bfbfccf9b738b548aacaa8500acd6f")
-DART_BASE = "https://opendart.fss.or.kr/api"
 
 def calc_stars(per, pbr, revenue_growth, profit_margin):
     score = 0
@@ -41,151 +33,165 @@ def get_recommendation(stars):
     elif stars >= 3: return {"label": "보통", "color": "gray", "icon": "➖"}
     else: return {"label": "비추천", "color": "red", "icon": "❌"}
 
-def load_corp_map():
-    corp_map = {}
-    try:
-        r = requests.get(f"{DART_BASE}/corpCode.xml",
-            params={"crtfc_key": DART_API_KEY}, timeout=30)
-        z = zipfile.ZipFile(io.BytesIO(r.content))
-        xml_data = z.read("CORPCODE.xml")
-        root = ET.fromstring(xml_data)
-        for corp in root.findall("list"):
-            stock_code = corp.findtext("stock_code", "").strip()
-            corp_code = corp.findtext("corp_code", "").strip()
-            if stock_code:
-                corp_map[stock_code] = corp_code
-        print(f"corp_map: {len(corp_map)}개")
-    except Exception as e:
-        print(f"corp_map 오류: {e}")
-    return corp_map
-
-def get_dart_financial(corp_code, year):
-    for fs_div in ["CFS", "OFS"]:
+def get_krx_stock_info():
+    """KRX 전종목 기본정보 (PER, PBR, 시가총액)"""
+    headers = {
+        "Referer": "http://data.krx.co.kr",
+        "User-Agent": "Mozilla/5.0"
+    }
+    url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+    
+    stocks = {}
+    
+    for mkt_id, mkt_name in [("STK", "KOSPI"), ("KSQ", "KOSDAQ")]:
         try:
-            r = requests.get(f"{DART_BASE}/fnlttSinglAcntAll.json", params={
-                "crtfc_key": DART_API_KEY,
-                "corp_code": corp_code,
-                "bsns_year": str(year),
-                "reprt_code": "11011",
-                "fs_div": fs_div
-            }, timeout=10)
+            # 오늘 날짜
+            today = datetime.now().strftime("%Y%m%d")
+            
+            r = requests.post(url, data={
+                "bld": "dbms/MDC/STAT/standard/MDCSTAT03501",
+                "mktId": mkt_id,
+                "trdDd": today,
+                "share": "1",
+                "money": "1",
+                "csvxls_isNo": "false"
+            }, headers=headers, timeout=30)
+            
             data = r.json()
-            if data.get("status") == "000":
-                items = data.get("list", [])
-                revenue = op_profit = None
-                for item in items:
-                    acct = item.get("account_nm", "")
-                    val_str = item.get("thstrm_amount", "").replace(",", "").strip()
-                    try:
-                        val = int(val_str)
-                    except:
-                        continue
-                    if any(k in acct for k in ["매출액", "수익(매출액)"]) and revenue is None:
-                        revenue = val
-                    elif "영업이익" in acct and "영업이익률" not in acct and op_profit is None:
-                        op_profit = val
-                return revenue, op_profit
-        except:
-            pass
-    return None, None
+            items = data.get("OutBlock_1", [])
+            print(f"{mkt_name}: {len(items)}개 종목")
+            
+            for item in items:
+                code = str(item.get("ISU_SRT_CD", "")).zfill(6)
+                if not code: continue
+                
+                def to_float(v):
+                    try: return float(str(v).replace(",", "").strip())
+                    except: return None
+                
+                per = to_float(item.get("PER"))
+                pbr = to_float(item.get("PBR"))
+                price = to_float(item.get("TDD_CLSPRC"))
+                marcap = to_float(item.get("MKTCAP"))
+                
+                stocks[code] = {
+                    "code": code,
+                    "name": str(item.get("ISU_ABBRV", "")),
+                    "market": mkt_name,
+                    "industry": str(item.get("IDX_IND_NM", "")),
+                    "price": int(price) if price else None,
+                    "per": round(per, 1) if per and 0 < per < 500 else None,
+                    "pbr": round(pbr, 1) if pbr and 0 < pbr < 100 else None,
+                    "marcap": int(marcap) if marcap else None,
+                }
+        except Exception as e:
+            print(f"{mkt_name} 오류: {e}")
+    
+    return stocks
 
-def process_stock(args):
-    """단일 종목 처리 (병렬용)"""
-    row, corp_map, prev_year, prev2_year, industry_col = args
-    try:
-        code = str(row.get("Code", "")).zfill(6)
-        name = str(row.get("Name", ""))
-        mkt = str(row.get("Market", ""))
-        industry = str(row.get(industry_col, "")) if industry_col else ""
+def get_krx_financials():
+    """KRX 전종목 재무데이터 (매출, 영업이익)"""
+    headers = {
+        "Referer": "http://data.krx.co.kr",
+        "User-Agent": "Mozilla/5.0"
+    }
+    url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+    
+    financials = {}
+    
+    # 연간 재무데이터
+    for year in [str(datetime.now().year - 1), str(datetime.now().year - 2)]:
+        try:
+            r = requests.post(url, data={
+                "bld": "dbms/MDC/STAT/standard/MDCSTAT03701",
+                "searchType": "1",
+                "mktId": "ALL",
+                "secugrpId": "STMFND",
+                "year": year,
+                "money": "1",
+                "csvxls_isNo": "false"
+            }, headers=headers, timeout=30)
+            
+            data = r.json()
+            items = data.get("OutBlock_1", [])
+            print(f"{year}년 재무데이터: {len(items)}개")
+            
+            for item in items:
+                code = str(item.get("ISU_SRT_CD", "")).zfill(6)
+                if not code: continue
+                
+                def to_float(v):
+                    try: return float(str(v).replace(",", "").strip())
+                    except: return None
+                
+                revenue = to_float(item.get("SALE_AMT"))
+                op_profit = to_float(item.get("BSOP_PROFT"))
+                
+                if code not in financials:
+                    financials[code] = {}
+                financials[code][year] = {
+                    "revenue": int(revenue) if revenue else None,
+                    "operating_profit": int(op_profit) if op_profit else None,
+                }
+        except Exception as e:
+            print(f"{year}년 재무 오류: {e}")
+    
+    return financials
 
-        if not name or name == "nan":
-            return None
-
-        def to_float(v):
-            try: return float(str(v).replace(",", ""))
-            except: return None
-
-        per = to_float(row.get("PER"))
-        pbr = to_float(row.get("PBR"))
-        price = to_float(row.get("Close", row.get("Adj Close")))
-        marcap = to_float(row.get("Marcap"))
-
-        per = round(per, 1) if per and 0 < per < 500 else None
-        pbr = round(pbr, 1) if pbr and 0 < pbr < 100 else None
-
-        corp_code = corp_map.get(code)
-        revenue_cur = revenue_prev = op_profit = None
-        if corp_code:
-            revenue_cur, op_profit = get_dart_financial(corp_code, prev_year)
-            revenue_prev, _ = get_dart_financial(corp_code, prev2_year)
-
-        revenue_growth = profit_margin = None
+def main():
+    print("KRX 전종목 데이터 수집 시작...")
+    
+    # 종목 기본정보
+    stocks = get_krx_stock_info()
+    print(f"총 {len(stocks)}개 종목 수집")
+    
+    # 재무데이터
+    financials = get_krx_financials()
+    print(f"재무데이터 {len(financials)}개 종목")
+    
+    prev_year = str(datetime.now().year - 1)
+    prev2_year = str(datetime.now().year - 2)
+    
+    # 데이터 합치기
+    result = []
+    for code, stock in stocks.items():
+        fin_cur = financials.get(code, {}).get(prev_year, {})
+        fin_prev = financials.get(code, {}).get(prev2_year, {})
+        
+        revenue_cur = fin_cur.get("revenue")
+        revenue_prev = fin_prev.get("revenue")
+        op_profit = fin_cur.get("operating_profit")
+        
+        revenue_growth = None
+        profit_margin = None
+        
         if revenue_cur and revenue_prev and revenue_prev != 0:
             revenue_growth = round((revenue_cur - revenue_prev) / abs(revenue_prev) * 100, 1)
         if op_profit and revenue_cur and revenue_cur != 0:
             profit_margin = round(op_profit / revenue_cur * 100, 1)
-
-        stars = calc_stars(per, pbr, revenue_growth, profit_margin)
-
-        return {
-            "code": code, "name": name, "market": mkt, "industry": industry,
-            "price": int(price) if price else None,
-            "per": per, "pbr": pbr,
-            "revenue": revenue_cur, "revenue_growth": revenue_growth,
-            "operating_profit": op_profit, "profit_margin": profit_margin,
-            "marcap": int(marcap) if marcap else None,
-            "stars": stars, "recommendation": get_recommendation(stars),
-        }
-    except:
-        return None
-
-def main():
-    print("전체 종목 데이터 수집 시작...")
-
-    k1 = fdr.StockListing("KOSPI"); k1["Market"] = "KOSPI"
-    k2 = fdr.StockListing("KOSDAQ"); k2["Market"] = "KOSDAQ"
-    df = pd.concat([k1, k2], ignore_index=True)
-    df.columns = [c.strip() for c in df.columns]
-    print(f"전체 종목: {len(df)}개")
-
-    corp_map = load_corp_map()
-    prev_year = datetime.now().year - 1
-    prev2_year = prev_year - 1
-    industry_col = next((c for c in ["Industry", "Sector", "업종"] if c in df.columns), None)
-
-    # 병렬 처리 준비
-    args_list = [
-        (row, corp_map, prev_year, prev2_year, industry_col)
-        for _, row in df.iterrows()
-    ]
-
-    stocks = []
-    completed = 0
-    total = len(args_list)
-
-    # 10개씩 병렬 처리
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(process_stock, args): args for args in args_list}
-        for future in as_completed(futures):
-            result = future.result()
-            if result:
-                stocks.append(result)
-            completed += 1
-            if completed % 100 == 0:
-                print(f"[{completed}/{total}] 진행 중... ({len(stocks)}개 수집)")
-
-    print(f"수집 완료: {len(stocks)}개 종목")
-
+        
+        stars = calc_stars(stock.get("per"), stock.get("pbr"), revenue_growth, profit_margin)
+        
+        result.append({
+            **stock,
+            "revenue": revenue_cur,
+            "revenue_growth": revenue_growth,
+            "operating_profit": op_profit,
+            "profit_margin": profit_margin,
+            "stars": stars,
+            "recommendation": get_recommendation(stars),
+        })
+    
     os.makedirs("data", exist_ok=True)
     output = {
         "updated": datetime.now().isoformat(),
-        "count": len(stocks),
-        "stocks": stocks
+        "count": len(result),
+        "stocks": result
     }
     with open("data/stocks.json", "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False)
-
-    print(f"저장 완료! data/stocks.json")
+    
+    print(f"완료! {len(result)}개 종목 저장됨")
 
 if __name__ == "__main__":
     main()
