@@ -306,6 +306,56 @@ def get_dividend_batch(corp_codes_chunk, year):
             pass
     return result
 
+def fetch_one_52w(args):
+    """단일 종목 52주 고저가 조회"""
+    code, start_str, end_str = args
+    try:
+        import FinanceDataReader as fdr
+        hist = fdr.DataReader(code, start_str, end_str)
+        if len(hist) > 0:
+            return code, {
+                "high_52w": int(hist["High"].max()),
+                "low_52w":  int(hist["Low"].min()),
+            }
+    except:
+        pass
+    return code, None
+
+def get_52w_high_low(df):
+    """FDR에서 52주 고저가 수집 — 20스레드 병렬로 빠르게"""
+    result = {}
+    try:
+        from datetime import timedelta
+        end = datetime.now()
+        start = end - timedelta(days=365)
+        start_str = start.strftime("%Y-%m-%d")
+        end_str = end.strftime("%Y-%m-%d")
+
+        codes = [str(c).zfill(6) for c in df["Code"].tolist()]
+        total = len(codes)
+        print(f"52주 고저가 수집 시작: {total}개 (20스레드 병렬)")
+
+        args_list = [(code, start_str, end_str) for code in codes]
+
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {executor.submit(fetch_one_52w, args): args[0] for args in args_list}
+            done = 0
+            for future in as_completed(futures):
+                try:
+                    code, data = future.result()
+                    if data:
+                        result[code] = data
+                except:
+                    pass
+                done += 1
+                if done % 500 == 0:
+                    print(f"  52주 {done}/{total} 완료 ({len(result)}개)")
+
+        print(f"52주 수집 완료: {len(result)}개")
+    except Exception as e:
+        print(f"52주 수집 오류: {e}")
+    return result
+
 def get_dart_financials_batch(corp_codes_list, year):
     all_data = {}
     total = len(corp_codes_list)
@@ -357,6 +407,9 @@ def main():
 
     print("KRX PER/PBR 수집 중...")
     per_pbr_map = get_krx_per_pbr()
+
+    print("52주 고저가 수집 중...")
+    w52_map = get_52w_high_low(df)
 
     try:
         r = requests.get(f"{DART_BASE}/fnlttMultiAcnt.json", params={
@@ -485,6 +538,15 @@ def main():
             if profit_margin and abs(profit_margin) > 100:
                 profit_margin = None  # 비정상적 이익률 제거
 
+            # 52주 고저가
+            w52 = w52_map.get(code, {})
+            high_52w = w52.get("high_52w")
+            low_52w  = w52.get("low_52w")
+            # 52주 위치 (현재가가 52주 범위에서 몇 % 위치인지)
+            w52_pct = None
+            if high_52w and low_52w and high_52w > low_52w and price:
+                w52_pct = round((price - low_52w) / (high_52w - low_52w) * 100, 1)
+
             sector = sector_map.get(code, "")
             stars = calc_stars(per, pbr, revenue_growth, profit_margin, sector)
 
@@ -499,6 +561,9 @@ def main():
                 "total_equity": total_equity,
                 "roe": roe,
                 "div_yield": div_yield,
+                "high_52w": high_52w,
+                "low_52w": low_52w,
+                "w52_pct": w52_pct,
                 "marcap": int(marcap) if marcap else None,
                 "stars": stars, "recommendation": get_recommendation(stars),
             })
