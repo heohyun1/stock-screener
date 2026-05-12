@@ -80,27 +80,51 @@ def get_sector_name(code):
         return SECTOR_NAMES[code[:2]]
     return ""
 
-def calc_stars(per, pbr, revenue_growth, profit_margin):
+def calc_stars(per, pbr, revenue_growth, profit_margin, sector=""):
+    """
+    현실적인 별점 계산
+    - PBR 0.5 미만이면 최소 별 3개 보장
+    - 매출 소폭 감소(-20% 이내)는 감점 없음
+    - 별 5개 기준 완화 (5점 이상)
+    - 데이터 없는 항목은 감점 없음
+    """
     score = 0
-    if per:
-        if per < 10: score += 2
+
+    # PBR: 자산 대비 저평가 핵심 지표
+    if pbr is not None:
+        if pbr < 0.5:   score += 3  # 엄청난 저평가
+        elif pbr < 1.0: score += 2  # 저평가
+        elif pbr < 1.5: score += 1  # 적정
+        elif pbr > 5:   score -= 1  # 고평가
+
+    # PER: 이익 대비 주가
+    if per is not None:
+        if per < 8:    score += 2
         elif per < 15: score += 1
-    if pbr:
-        if pbr < 1: score += 2
-        elif pbr < 1.5: score += 1
+        elif per > 30: score -= 1
+
+    # 매출 성장률: 급감(-20% 초과)만 감점
     if revenue_growth is not None:
-        if revenue_growth >= 20: score += 2
+        if revenue_growth >= 20:   score += 2
         elif revenue_growth >= 10: score += 1
-        elif revenue_growth < 0: score -= 1
+        elif revenue_growth < -20: score -= 1
+
+    # 영업이익률: 5% 이상이면 가점
     if profit_margin is not None:
-        if profit_margin >= 15: score += 2
-        elif profit_margin >= 8: score += 1
-        elif profit_margin < 0: score -= 1
-    if score >= 6: return 5
-    elif score >= 4: return 4
-    elif score >= 2: return 3
-    elif score >= 1: return 2
-    else: return 1
+        if profit_margin >= 15:  score += 2
+        elif profit_margin >= 5: score += 1
+        elif profit_margin < 0:  score -= 1
+
+    # PBR 0.5 미만은 무조건 최소 별 3개 (저평가 보호)
+    min_stars = 3 if (pbr is not None and pbr < 0.5) else 1
+
+    if score >= 5:   stars = 5
+    elif score >= 3: stars = 4
+    elif score >= 1: stars = 3
+    elif score >= 0: stars = 2
+    else:            stars = 1
+
+    return max(stars, min_stars)
 
 def get_recommendation(stars):
     if stars >= 5: return {"label": "강력추천", "color": "green", "icon": "🌟"}
@@ -236,7 +260,7 @@ def get_dart_financials_batch(corp_codes_list, year):
                         all_data[code]["revenue"] = val
                     elif "영업이익" in acct and "영업이익률" not in acct and "operating_profit" not in all_data[code]:
                         all_data[code]["operating_profit"] = val
-                    elif "당기순이익" in acct and "순이익" not in acct and "net_profit" not in all_data[code]:
+                    elif "당기순이익" in acct and "net_profit" not in all_data[code]:
                         all_data[code]["net_profit"] = val
                     elif "부채총계" in acct and "total_debt" not in all_data[code]:
                         all_data[code]["total_debt"] = val
@@ -358,7 +382,7 @@ def main():
                 debt_ratio = round(total_debt / total_equity * 100, 1)
 
             sector = sector_map.get(code, "")
-            stars = calc_stars(per, pbr, revenue_growth, profit_margin)
+            stars = calc_stars(per, pbr, revenue_growth, profit_margin, sector)
 
             stocks.append({
                 "code": code, "name": name, "market": mkt, "sector": sector, "industry": sector,
