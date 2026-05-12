@@ -490,14 +490,19 @@ def main():
             mkt = str(row.get("Market", ""))
             if not name or name == "nan": continue
 
+            # 우선주 처리 — 끝자리 5인 경우 보통주(끝자리 0) 데이터 사용
+            base_code = code
+            if code.endswith("5") and not fin_cur.get(code):
+                base_code = code[:-1] + "0"
+
             # KRX에서 가져온 PER/PBR 우선, 없으면 DART 계산
             per = per_pbr_map.get(code, {}).get("per")
             pbr = per_pbr_map.get(code, {}).get("pbr")
             price = to_float(row.get("Close", row.get("Adj Close")))
             marcap = to_float(row.get("Marcap"))
 
-            fin = fin_cur.get(code, {})
-            fin_p = fin_prev.get(code, {})
+            fin = fin_cur.get(base_code, fin_cur.get(code, {}))
+            fin_p = fin_prev.get(base_code, fin_prev.get(code, {}))
             revenue_cur = fin.get("revenue")
             revenue_prev = fin_p.get("revenue")
             op_profit = fin.get("operating_profit")
