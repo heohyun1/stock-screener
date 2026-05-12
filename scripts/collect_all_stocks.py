@@ -109,6 +109,7 @@ def get_recommendation(stars):
     else: return {"label": "비추천", "color": "red", "icon": "❌"}
 
 def get_krx_per_pbr():
+    """KRX에서 PER/PBR 수집 (실패시 빈 dict 반환 — DART 계산으로 대체)"""
     per_pbr = {}
     try:
         url = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
@@ -145,8 +146,34 @@ def get_krx_per_pbr():
             print(f"KRX {mktid}: {len(items)}개 종목 처리")
         print(f"KRX PER/PBR 수집 완료: {len(per_pbr)}개")
     except Exception as e:
-        print(f"KRX PER/PBR 오류: {e}")
+        print(f"KRX PER/PBR 오류 (DART 계산으로 대체): {e}")
     return per_pbr
+
+
+def calc_per_pbr_from_dart(price, shares, net_profit, total_equity):
+    """
+    DART 재무데이터 + 주가 + 주식수로 PER/PBR 직접 계산
+    PER = 주가 / EPS(주당순이익)   EPS = 순이익 / 주식수
+    PBR = 주가 / BPS(주당순자산)   BPS = 자본총계 / 주식수
+    """
+    per = pbr = None
+    try:
+        if price and shares and shares > 0 and net_profit and net_profit > 0:
+            eps = net_profit / shares
+            if eps > 0:
+                per_val = price / eps
+                if 0 < per_val < 500:
+                    per = round(per_val, 1)
+    except: pass
+    try:
+        if price and shares and shares > 0 and total_equity and total_equity > 0:
+            bps = total_equity / shares
+            if bps > 0:
+                pbr_val = price / bps
+                if 0 < pbr_val < 100:
+                    pbr = round(pbr_val, 1)
+    except: pass
+    return per, pbr
 
 def load_corp_map():
     corp_map = {}
@@ -300,6 +327,7 @@ def main():
             mkt = str(row.get("Market", ""))
             if not name or name == "nan": continue
 
+            # KRX에서 가져온 PER/PBR 우선, 없으면 DART 계산
             per = per_pbr_map.get(code, {}).get("per")
             pbr = per_pbr_map.get(code, {}).get("pbr")
             price = to_float(row.get("Close", row.get("Adj Close")))
@@ -313,6 +341,13 @@ def main():
             net_profit = fin.get("net_profit")
             total_debt = fin.get("total_debt")
             total_equity = fin.get("total_equity")
+
+            # KRX 실패시 DART로 PER/PBR 계산
+            shares = to_float(row.get("Stocks"))
+            if per is None or pbr is None:
+                d_per, d_pbr = calc_per_pbr_from_dart(price, shares, net_profit, total_equity)
+                if per is None: per = d_per
+                if pbr is None: pbr = d_pbr
 
             revenue_growth = profit_margin = debt_ratio = None
             if revenue_cur and revenue_prev and revenue_prev != 0:
