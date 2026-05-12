@@ -234,6 +234,33 @@ def get_sector_batch(corp_codes_chunk):
             result[stock_code] = ""
     return result
 
+def get_dividend_batch(corp_codes_chunk, year):
+    """DART 배당 정보 수집"""
+    result = {}
+    for corp_code, stock_code in corp_codes_chunk:
+        try:
+            r = requests.get(f"{DART_BASE}/alotMatter.json", params={
+                "crtfc_key": DART_API_KEY,
+                "corp_code": corp_code,
+                "bsns_year": str(year),
+                "reprt_code": "11011",
+            }, timeout=10)
+            data = r.json()
+            if data.get("status") == "000":
+                for item in data.get("list", []):
+                    # 주당 현금배당금
+                    dps_str = item.get("dwdn_pday_cas_dv_am", "").replace(",", "").strip()
+                    try:
+                        dps = float(dps_str)
+                        if dps > 0:
+                            result[stock_code] = dps
+                            break
+                    except:
+                        pass
+        except:
+            pass
+    return result
+
 def get_dart_financials_batch(corp_codes_list, year):
     all_data = {}
     total = len(corp_codes_list)
@@ -339,6 +366,20 @@ def main():
                     print(f"업종 오류: {e}")
         print(f"업종 수집 완료: {len(sector_map)}개")
 
+        # 배당 수집
+        print("배당 데이터 수집 중...")
+        div_map = {}
+        div_chunks = [corp_stock_pairs[i:i+50] for i in range(0, len(corp_stock_pairs), 50)]
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(get_dividend_batch, c, prev_year): c for c in div_chunks}
+            for future in as_completed(futures):
+                try:
+                    div_map.update(future.result())
+                except: pass
+        print(f"배당 수집 완료: {len(div_map)}개")
+    else:
+        div_map = {}
+
     def to_float(v):
         try: return float(str(v).replace(",", "").strip())
         except: return None
@@ -373,13 +414,21 @@ def main():
                 if per is None: per = d_per
                 if pbr is None: pbr = d_pbr
 
-            revenue_growth = profit_margin = debt_ratio = None
+            revenue_growth = profit_margin = debt_ratio = roe = None
             if revenue_cur and revenue_prev and revenue_prev != 0:
                 revenue_growth = round((revenue_cur - revenue_prev) / abs(revenue_prev) * 100, 1)
             if op_profit and revenue_cur and revenue_cur != 0:
                 profit_margin = round(op_profit / revenue_cur * 100, 1)
             if total_debt and total_equity and total_equity > 0:
                 debt_ratio = round(total_debt / total_equity * 100, 1)
+            # ROE = 순이익 ÷ 자본총계 × 100
+            if net_profit and total_equity and total_equity > 0:
+                roe = round(net_profit / total_equity * 100, 1)
+            # 배당수익률 = 주당배당금 ÷ 주가 × 100
+            div_yield = None
+            dps = div_map.get(code)
+            if dps and price and price > 0:
+                div_yield = round(dps / price * 100, 2)
 
             sector = sector_map.get(code, "")
             stars = calc_stars(per, pbr, revenue_growth, profit_margin, sector)
@@ -393,6 +442,8 @@ def main():
                 "operating_profit": op_profit, "net_profit": net_profit,
                 "profit_margin": profit_margin, "debt_ratio": debt_ratio,
                 "total_equity": total_equity,
+                "roe": roe,
+                "div_yield": div_yield,
                 "marcap": int(marcap) if marcap else None,
                 "stars": stars, "recommendation": get_recommendation(stars),
             })
